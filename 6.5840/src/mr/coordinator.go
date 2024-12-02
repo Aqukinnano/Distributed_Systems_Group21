@@ -1,11 +1,11 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
-	"os"
 	"sync"
 	"time"
 )
@@ -29,33 +29,57 @@ const (
 )
 
 type Coordinator struct {
-	mapState         map[string]int    // state of map[filename]
-	reduceState      map[int]int       // state of reduce[id]
-	mapCh            chan MapTask      // map task channel
-	reduceCh         chan int          //reduce task channel
-	nReduce          int               // number of reduce as defined in the paper
-	mapFinished      bool              // indicates if all map tasks done
-	reduceFinished   bool              // indicates if all reduce tasks done
-	workerHeartbeats map[int]time.Time // store last heartbeat time for workers
-	workerTasks      map[int]TaskInfo  // store worker task info
-	workerCounter    int               // count the number of workers
-	mapCount         int               // map task count, equals number of files
-	mutex            sync.Mutex        //atomicity for coordinator access
-	hearbeatChecking map[int]bool      // whether workerID is under heartbeat checking (doing map/reduce job)
+	mapState         map[string]int         // state of map[filename]
+	reduceState      map[int]int            // state of reduce[id]
+	mapCh            chan MapTask           // map task channel
+	reduceCh         chan int               //reduce task channel
+	nReduce          int                    // number of reduce as defined in the paper
+	mapFinished      bool                   // indicates if all map tasks done
+	reduceFinished   bool                   // indicates if all reduce tasks done
+	workerHeartbeats map[int]time.Time      // store last heartbeat time for workers
+	workerTasks      map[int]TaskInfo       // store worker task info
+	workerCounter    int                    // count the number of workers
+	mapCount         int                    // map task count, equals number of files
+	mutex            sync.Mutex             //atomicity for coordinator access
+	hearbeatChecking map[int]bool           // whether workerID is under heartbeat checking (doing map/reduce job)
+	intermediateData map[int]map[int][]byte // reduceId -> mapId -> data
 }
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := coordinatorSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname)
+	l, e := net.Listen("tcp", ":1234")
+	//sockname := coordinatorSock()
+	//os.Remove(sockname)
+	//l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
+}
+
+func (c *Coordinator) ReceiveMapOutput(args *SendFileArgs, reply *SendFileReply) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.intermediateData[args.MapId] == nil {
+		c.intermediateData[args.MapId] = make(map[int][]byte)
+	}
+	c.intermediateData[args.MapId][args.ReduceId] = args.Data
+	reply.Success = true
+	return nil
+}
+
+func (c *Coordinator) FetchReduceInput(args *FetchReduceInputArgs, reply *FetchReduceInputReply) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if data, ok := c.intermediateData[args.MapId][args.ReduceId]; ok {
+		reply.Data = data
+		return nil
+	}
+	return fmt.Errorf("data not found for mapId %d and reduceId %d", args.MapId, args.ReduceId)
 }
 
 // main/mrcoordinator.go calls Done() periodically to find out
@@ -206,6 +230,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		reduceFinished:   false,
 		mutex:            sync.Mutex{},
 		hearbeatChecking: make(map[int]bool),
+		intermediateData: make(map[int]map[int][]byte), //init mediate data
 	}
 	// add files, create related map tasks
 	for i, filename := range files {
