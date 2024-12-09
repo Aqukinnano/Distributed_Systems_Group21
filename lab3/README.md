@@ -26,6 +26,7 @@ example:
 //create a second node to join the ring
 ./ChordClient -a 127.0.0.1 -p 8002 -sp 2202 -ts 1000 -tff 1000 -tcp 1000 -tb 1000 -r 3 -ja 127.0.0.1 -jp 8001
 
+
 instructions after running:
 Lookup <filename> or l <filename>
 
@@ -33,3 +34,13 @@ StoreFile <filepath> [ssh] [encrypt] or s <filepath> [ssh] [encrypt]
 (use "s <filepath> f f" to disale encryption)
 
 PrintState or p
+
+
+generate keys:
+1. mkdir keys
+2. ssh-keygen -t rsa -f keys/id_rsa -N "" 
+//generate SSH key pair
+3. openssl genrsa -out keys/encryption.pem 2048
+//generate RSA key pair for encryption
+4. openssl rsa -in keys/encryption.pem -pubout -out keys/encryption-pub.pem
+//extract the public key from the private key
