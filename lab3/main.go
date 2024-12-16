@@ -40,7 +40,7 @@ const (
 
 // Constants for SFTP
 const (
-	USER = "foo"
+	USER = "Mayoi"
 )
 
 // File constanst
@@ -167,8 +167,8 @@ func InitFlags(f *Flags) error {
 	flag.IntVar(&f.SshPort, "sp", INVALID_INT, "The port number for the SSH server. Must be specidfied")
 	flag.StringVar(&f.JoinIpAddress, "ja", INVALID_STRING, "The IP address of the machine running a Chord node. The Chord client will join this nodes ring. Represented as an ASCII string (e.g., 128.8.126.63). Must be specified if --jp is specified.")
 	flag.IntVar(&f.JoinPort, "jp", INVALID_INT, "The port that an existing Chord node is bound to and listening on. The Chord client will join this nodes ring. Represented as a base-10 integer. Must be specified if --ja is specified.")
-	flag.IntVar(&f.TimeStabilize, "ts", INVALID_INT, "The port that an existing Chord node is bound to and listening on. The Chord client will join this nodes ring. Represented as a base-10 integer. Must be specified if --ja is specified.")
-	flag.IntVar(&f.TimeFixFingers, "tff", INVALID_INT, "The port that an existing Chord node is bound to and listening on. The Chord client will join this nodes ring. Represented as a base-10 integer. Must be specified if --ja is specified.")
+	flag.IntVar(&f.TimeStabilize, "ts", INVALID_INT, "The time in milliseconds between invocations of ‘stabilize’. Represented as a base-10 integer. Must be specified, with a value in the range of [1,60000].")
+	flag.IntVar(&f.TimeFixFingers, "tff", INVALID_INT, "The time in milliseconds between invocations of ‘fix fingers’. Represented as a base-10 integer. Must be specified, with a value in the range of [1,60000].")
 	flag.IntVar(&f.TimeCheckPredecessor, "tcp", INVALID_INT, "The time in milliseconds between invocations of check predecessor.")
 	flag.IntVar(&f.TimeBackup, "tb", INVALID_INT, "The time duration for backup interval.Must be specified")
 	flag.IntVar(&f.SuccessorLimit, "r", INVALID_INT, "The number of successors maintained by the Chord client. Represented as a base-10 integer. Must be specified, with a value in the range of [1,32].")
@@ -438,42 +438,135 @@ func Leave(n *Node) {
 
 }
 
+// func Stabilize() {
+// 	var x *NodeInfo
+// 	var successorIndex = -1
+// 	var n = Get()
+// 	for index, item := range n.Successors {
+// 		var err error
+// 		x, err = Predecessor(ObtainChordAddress(item))
+// 		// fmt.Printf("[chordFunctions.Stabilize] NodePredecessor is %v, err: %v, NodeIndex: %v", x, err, index)
+// 		if err == nil {
+// 			successorIndex = index
+// 			break
+// 		}
+// 	}
+// 	if x != nil && Between(&n.Info.Identifier, &x.Identifier, &n.Successors[successorIndex].Identifier, false) {
+// 		NewSuccessor(*x)
+// 	} else if x != nil {
+// 	} else {
+
+// 		NewSuccessor(n.Info)
+// 	}
+// 	if NoOfSuccessors() > 0 {
+
+// 		var errNotify = ClientNotification(ObtainChordAddress(Successor()), n.Info)
+// 		if errNotify != nil {
+// 			fmt.Printf("[stabilze] Error found while notifying successor %v, message: %v", Successor(), errNotify.Error())
+// 		}
+
+// 		var successors, errSuc = Successors(ObtainChordAddress(Successor()))
+// 		if errSuc == nil {
+
+//				AddSuccessors(successors)
+//			} else {
+//				fmt.Printf("[stabilize] Error found while fetching node successors from successor %v, message: %v", Successor(), errSuc.Error())
+//			}
+//		}
+//		// fmt.Printf("[stabilize] Successor List updated with new Successor as %v, new length is %v", n.Successors[0], len(n.Successors))
+//	}
 func Stabilize() {
 	var x *NodeInfo
 	var successorIndex = -1
 	var n = Get()
+
+	// 如果后继列表为空，指向自己
+	if len(n.Successors) == 0 {
+		NewSuccessor(n.Info)
+		return
+	}
+
+	// 遍历后继节点，尝试获取前驱
+	var allSuccessorsDown = true
+	maxRetries := 3
+
 	for index, item := range n.Successors {
 		var err error
-		x, err = Predecessor(ObtainChordAddress(item))
-		// fmt.Printf("[chordFunctions.Stabilize] NodePredecessor is %v, err: %v, NodeIndex: %v", x, err, index)
-		if err == nil {
-			successorIndex = index
+		// 添加重试机制
+		for retry := 0; retry < maxRetries; retry++ {
+			x, err = Predecessor(ObtainChordAddress(item))
+			if err == nil {
+				successorIndex = index
+				allSuccessorsDown = false
+				break
+			}
+			if retry < maxRetries-1 {
+				time.Sleep(time.Millisecond * 100) // 重试前等待
+			}
+		}
+		if !allSuccessorsDown {
 			break
 		}
 	}
+
+	// 如果所有后继节点都无法访问
+	if allSuccessorsDown {
+		NewSuccessor(n.Info)
+		return
+	}
+
+	// 如果找到了前驱节点，检查是否需要更新后继
 	if x != nil && Between(&n.Info.Identifier, &x.Identifier, &n.Successors[successorIndex].Identifier, false) {
 		NewSuccessor(*x)
-	} else if x != nil {
-	} else {
-
-		NewSuccessor(n.Info)
 	}
+
+	// 只在有后继节点时执行通知操作
 	if NoOfSuccessors() > 0 {
-
-		var errNotify = ClientNotification(ObtainChordAddress(Successor()), n.Info)
-		if errNotify != nil {
-			fmt.Printf("[stabilze] Error found while notifying successor %v, message: %v", Successor(), errNotify.Error())
+		// 通知后继节点，带重试
+		var notifySuccess bool
+		notifySuccess = false
+		for retry := 0; retry < maxRetries; retry++ {
+			errNotify := ClientNotification(ObtainChordAddress(Successor()), n.Info)
+			if errNotify == nil {
+				notifySuccess = true
+				break
+			}
+			if retry < maxRetries-1 {
+				time.Sleep(time.Millisecond * 100)
+			} else {
+				fmt.Printf("[stabilze] Error found while notifying successor %v after %d retries, message: %v\n",
+					Successor(), maxRetries, errNotify.Error())
+			}
 		}
 
-		var successors, errSuc = Successors(ObtainChordAddress(Successor()))
-		if errSuc == nil {
+		// 只在通知成功时尝试获取后继的后继列表
+		if notifySuccess {
+			var successors []NodeInfo
+			var fetchSuccess bool
+			fetchSuccess = false
 
-			AddSuccessors(successors)
-		} else {
-			fmt.Printf("[stabilize] Error found while fetching node successors from successor %v, message: %v", Successor(), errSuc.Error())
+			// 获取后继的后继列表，带重试
+			for retry := 0; retry < maxRetries; retry++ {
+				var errSuc error
+				successors, errSuc = Successors(ObtainChordAddress(Successor()))
+				if errSuc == nil {
+					fetchSuccess = true
+					break
+				}
+				if retry < maxRetries-1 {
+					time.Sleep(time.Millisecond * 100)
+				} else {
+					fmt.Printf("[stabilize] Error found while fetching node successors from successor %v after %d retries, message: %v\n",
+						Successor(), maxRetries, errSuc.Error())
+				}
+			}
+
+			// 只在成功获取后继列表时更新
+			if fetchSuccess && len(successors) > 0 {
+				AddSuccessors(successors)
+			}
 		}
 	}
-	// fmt.Printf("[stabilize] Successor List updated with new Successor as %v, new length is %v", n.Successors[0], len(n.Successors))
 }
 
 func Notify(node NodeInfo) {
@@ -556,24 +649,26 @@ func FileBackup() {
 		LiberateRWLock(false)
 		return
 	}
-	fmt.Printf("[chordFunctions.FileBackup] Available Files in the system: %v\n", ownedFiles)
+	//fmt.Printf("[chordFunctions.FileBackup] Available Files in the system: %v\n", ownedFiles)
 
 	var unavailableFiles = ObtainMissingFiles(successors, ownedFiles)
 	var fls = NodeFilesRead(nodeKey, ownedFiles)
-	fmt.Printf("[chordFunctions.FileBackup] Files Missing for Successors: %v\n", unavailableFiles)
+	//fmt.Printf("[chordFunctions.FileBackup] Files Missing for Successors: %v\n", unavailableFiles)
 	var wg = new(sync.WaitGroup)
 	wg.Add(len(successors))
 	for index, item := range successors {
 		go func(i int, node NodeInfo) {
 			var filesToTransfer = map[string]*[]byte{}
-			for _, missingFile := range unavailableFiles[i] {
-				var file, ok = fls[missingFile]
-				if ok {
-					filesToTransfer[missingFile] = file
+			if i < len(unavailableFiles) {
+				for _, missingFile := range unavailableFiles[i] {
+					var file, ok = fls[missingFile]
+					if ok {
+						filesToTransfer[missingFile] = file
+					}
 				}
-			}
-			if len(filesToTransfer) > 0 {
-				FileTransfer(ObtainChordAddress(node), filesToTransfer)
+				if len(filesToTransfer) > 0 {
+					FileTransfer(ObtainChordAddress(node), filesToTransfer)
+				}
 			}
 			wg.Done()
 		}(index, item)
@@ -746,6 +841,7 @@ func CommandExecution(cmdArr []string) {
 	switch cmdArr[0] {
 	case "Lookup", "l":
 		var answer, errLookup = Lookup(*Hash(cmdArr[1]))
+		var fileHash = Hash(cmdArr[1]) // 先计算文件哈希值并保存
 		if errLookup != nil {
 			fmt.Println(errLookup.Error())
 			return
@@ -756,6 +852,13 @@ func CommandExecution(cmdArr []string) {
 			return
 		}
 		fmt.Println(*state)
+		// 新增：尝试读取并打印文件内容
+		var content, errRead = ReadNodeFile(answer.Identifier.String(), fileHash.String())
+		if errRead != nil {
+			fmt.Printf("fail to read content: %v\n", errRead)
+			return
+		}
+		fmt.Printf("\ncontent of file:\n%s\n", content)
 	case "StoreFile", "s":
 		var ssh = ObtainTurnOffOption(cmdArr, 2)
 		var encryption = ObtainTurnOffOption(cmdArr, 3)
@@ -1063,14 +1166,14 @@ func (t *ChordRPCHandler) FileTransfer(args *TransferFileArgs, reply *string) er
 }
 
 func (t *ChordRPCHandler) MissingFiles(args *[]string, reply *[]string) error {
-	fmt.Printf("[rpcServer] missing files with args: %v\n", *args)
+	//fmt.Printf("[rpcServer] missing files with args: %v\n", *args)
 	var nodeKey = Get().Info.Identifier
 	var files, err = ListFiles(nodeKey.String())
 	if err != nil {
 		return err
 	}
 	var temp = ObtainExclusive(*args, files)
-	fmt.Printf("[rpcServer] replying with: %v\n", temp)
+	//fmt.Printf("[rpcServer] replying with: %v\n", temp)
 	*reply = temp
 	return nil
 }
@@ -1107,6 +1210,7 @@ func handleCall[ArgT, RepT any](nodeAddress NodeAddress, method string, args *Ar
 	if err != nil {
 		return err
 	}
+	defer client.Close() // 确保连接被关闭
 	return client.Call(method, args, reply)
 }
 func Predecessor(node NodeAddress) (*NodeInfo, error) {
