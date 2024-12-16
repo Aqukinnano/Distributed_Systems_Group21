@@ -17,16 +17,6 @@ compulsory flags:
 10. -r: The number of successors maintained by the Chord client. Represented as a base-10 integer. Must be specified, with a value in the range of [1,32].
 11. -i: The identifier (ID) assigned to the Chord client which will override the ID computed by the SHA1 sum of the client’s IP address and port number. Represented as a string of 40 characters matching [0-9a-fA-F]. Optional parameter.
 
-
-
-example: 
-//create the first node of a new ring
-./ChordClient -a 127.0.0.1 -p 8001 -sp 2201 -ts 1000 -tff 1000 -tcp 1000 -tb 1000 -r 3
-
-//create a second node to join the ring
-./ChordClient -a 127.0.0.1 -p 8002 -sp 2202 -ts 1000 -tff 1000 -tcp 1000 -tb 1000 -r 3 -ja 127.0.0.1 -jp 8001
-
-
 instructions after running:
 Lookup <filename> or l <filename>
 
@@ -35,6 +25,25 @@ StoreFile <filepath> [ssh] [encrypt] or s <filepath> [ssh] [encrypt]
 
 PrintState or p
 
+
+HOW TO START
+V2.0  12/16 updated 
+show 8 terminals by Tmux now
+////make sure to install Tmux first!
+////check the username in main.go and startsfpt.sh
+
+just use "./start.sh"
+
+
+
+
+v1
+example: 
+//create the first node of a new ring
+./ChordClient -a 127.0.0.1 -p 8001 -sp 2201 -ts 1000 -tff 1000 -tcp 1000 -tb 1000 -r 3
+
+//create a second node to join the ring
+./ChordClient -a 127.0.0.1 -p 8002 -sp 2202 -ts 1000 -tff 1000 -tcp 1000 -tb 1000 -r 3 -ja 127.0.0.1 -jp 8001
 
 generate keys:
 1. mkdir keys
