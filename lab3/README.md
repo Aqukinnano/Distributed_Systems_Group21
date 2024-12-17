@@ -33,6 +33,7 @@ show 8 terminals by Tmux now
 ////check the username in main.go and startsfpt.sh
 
 just use "./start.sh"
+return to Tmux terminal and use "tmux kill-server" to exit
 
 
 
