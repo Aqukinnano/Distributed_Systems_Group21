@@ -1,3 +1,6 @@
+// Package main implements a complete Chord Distributed Hash Table (DHT) system.
+// This implementation follows the Chord protocol design for distributed key-value storage
+// and lookup in a peer-to-peer network environment.
 package main
 
 import (
@@ -27,72 +30,94 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// The m bit from the paper, meaning a possible of 2^m nodes can be in the system The number of bits from the paper meaning the number of nodes in the system 2^m
+// BITS_SIZE_RING defines the size of the identifier space in the Chord ring.
+// A 160-bit ring size allows for 2^160 possible node identifiers, matching SHA-1 hash size.
+// This ensures a large enough address space to minimize the probability of ID collisions.
 const BITS_SIZE_RING = 160
 
-// Constants for RSA encryption
+// Constants for RSA encryption operations
 const (
-	LABEL                           = "content"
+	// LABEL is used as additional data in encryption operations
+	LABEL = "content"
+	// Paths to various encryption and authentication keys
 	ENCRYPTION_PUBLIC_KEY_PATH      = "./keys/encryption-pub.pem"
 	AUTHENTICATION_PUBLIC_KEY_PATH  = "./keys/id_rsa.pub"
 	AUTHENTICATION_PRIVATE_KEY_PATH = "./keys/id_rsa"
 )
 
-// Constants for SFTP
+// Constants for SFTP operations
 const (
+	// USER defines the username for SFTP connections
 	USER = "Mayoi"
 )
 
-// File constanst
+// File system related constants
 const (
+	// Base directory for storing DHT resources
 	FOLDER_RESOURCES = "./resources"
+	// File permissions: read/write for owner only
 	PERMISSIONS_FILE = 0o600
-	PERMISSIONS_DIR  = 0o700
+	// Directory permissions: read/write/execute for owner only
+	PERMISSIONS_DIR = 0o700
 )
 
-// rpctypes
+// RPC types for node communication
+
+// SuccessorRep represents a response containing successor node information
 type SuccessorRep struct {
 	Successors []NodeInfo
 }
+
+// PredecessorRep represents a response containing predecessor node information
 type PredecessorRep struct {
 	Predecessor *NodeInfo
 }
+
+// StoreFileArgs represents arguments for file storage operations
 type StoreFileArgs struct {
-	Key     big.Int
-	Content []byte
+	Key     big.Int // File identifier in the DHT
+	Content []byte  // Actual file content
 }
 
+// TransferFileArgs represents arguments for file transfer operations
 type TransferFileArgs struct {
-	Files map[string]*[]byte
+	Files map[string]*[]byte // Map of filenames to their contents
 }
+
+// FindSuccessorRep represents a response for successor lookup operations
 type FindSuccessorRep struct {
-	Found bool
-	Node  NodeInfo
+	Found bool     // Whether the successor was found
+	Node  NodeInfo // Information about the found node
 }
+
+// NodeAddress is a custom type for representing node network addresses
 type NodeAddress string
 
+// Key is a custom type for DHT keys
 type Key string
 
+// NodeInfo contains essential information about a node in the Chord ring
 type NodeInfo struct {
-	IpAddress  string
-	ChordPort  int
-	SshPort    int
-	Identifier big.Int
+	IpAddress  string  // Node's IP address
+	ChordPort  int     // Port used for Chord protocol communication
+	SshPort    int     // Port used for SSH/SFTP file transfer
+	Identifier big.Int // Node's position in the Chord ring
 }
 
+// Node represents a complete node in the Chord DHT
 type Node struct {
-	Info            NodeInfo
-	FingerTable     []NodeInfo
-	FingerTableSize int
-	Predecessor     *NodeInfo
-	Successors      []NodeInfo
-	SuccessorsSize  int
-	NextFinger      int
+	Info            NodeInfo   // Basic node information
+	FingerTable     []NodeInfo // Routing table for efficient lookups
+	FingerTableSize int        // Maximum size of finger table
+	Predecessor     *NodeInfo  // Previous node in the ring
+	Successors      []NodeInfo // List of successor nodes for redundancy
+	SuccessorsSize  int        // Number of successors to maintain
+	NextFinger      int        // Next finger table entry to update
 }
 
+// main initializes and starts a Chord node with the specified configuration
 func main() {
-
-	// Reading the flags
+	// Parse and validate command line flags
 	var f Flags
 	var errFlags = InitFlags(&f)
 	if errFlags != nil {
@@ -100,29 +125,30 @@ func main() {
 		return
 	}
 
-	// Chord Ring Creation
+	// Initialize Chord ring configuration
 	var NewRingcreate = f.CreateNewRingSet()
 	var additionalIdetifier = f.GetAdditionaIIdentifier()
 	var additionalIdetifierBigInt *big.Int = nil
 	if additionalIdetifier != nil {
 		var res, errOptionalIdentifier = ConvertHexString(*additionalIdetifier)
 		if errOptionalIdentifier != nil {
-			// fmt.Printf("Optional Identifier converting error" + errOptionalIdentifier.Error())
 			return
 		}
 		additionalIdetifierBigInt = res
 	}
 
+	// Start the Chord node
 	var errChord = Start(f.IpAddress, f.ChordPort, f.SshPort, BITS_SIZE_RING, f.SuccessorLimit, NewRingcreate, &f.JoinIpAddress, &f.JoinPort, additionalIdetifierBigInt)
 	if errChord != nil {
 		fmt.Printf("Chord Node initialization error " + errChord.Error())
 		return
 	}
 
+	// Initialize node's file system
 	var nodeKey = Get().Info.Identifier
 	InitNodeFileSystem(nodeKey.String())
 
-	// Server Initialization
+	// Initialize RPC server
 	var listener, errListener = net.Listen("tcp", ":"+fmt.Sprintf("%v", f.ChordPort))
 	if errListener != nil {
 		fmt.Printf("Listening Socket Initialization error " + errListener.Error())
@@ -130,36 +156,38 @@ func main() {
 	}
 	RpcServerInit(&listener)
 
-	// Scheduling tasks for stabilize, fix fingers, check predecessor and FileBackup
+	// Schedule periodic maintenance tasks
 	Schedule(Stabilize, time.Duration(f.TimeStabilize*int(time.Millisecond)))
 	Schedule(FixFingers, time.Duration(f.TimeFixFingers*int(time.Millisecond)))
 	Schedule(CheckPredecessor, time.Duration(f.TimeCheckPredecessor*int(time.Millisecond)))
 	Schedule(FileBackup, time.Duration(f.TimeBackup*int(time.Millisecond)))
 
-	// Requesting for User Input
+	// Start command line interface
 	CommandsExecution()
 }
 
-// All member variables need to be capitalized for them to be accessible outside the package
+// Flags struct holds all command-line configuration parameters
 type Flags struct {
-	IpAddress            string
-	ChordPort            int
-	SshPort              int
-	JoinIpAddress        string
-	JoinPort             int
-	TimeStabilize        int
-	TimeFixFingers       int
-	TimeCheckPredecessor int
-	TimeBackup           int
-	SuccessorLimit       int
-	identifierOverride   string
+	IpAddress            string // Node's IP address
+	ChordPort            int    // Port for Chord protocol
+	SshPort              int    // Port for SSH server
+	JoinIpAddress        string // IP of existing node to join
+	JoinPort             int    // Port of existing node to join
+	TimeStabilize        int    // Interval between stabilize calls
+	TimeFixFingers       int    // Interval between fix_fingers calls
+	TimeCheckPredecessor int    // Interval between predecessor checks
+	TimeBackup           int    // Interval between backups
+	SuccessorLimit       int    // Maximum number of successors
+	identifierOverride   string // Optional manual node identifier
 }
 
+// Constants for invalid flag values
 const (
 	INVALID_STRING = "NOT_VALID"
 	INVALID_INT    = -1
 )
 
+// InitFlags initializes and validates command line flags
 func InitFlags(f *Flags) error {
 	//Placeholder default value as item must be specified
 	flag.StringVar(&f.IpAddress, "a", INVALID_STRING, "The IP address that the Chord client will bind to, as well as advertise to other nodes. Represented as an ASCII string (e.g., 128.8.126.63). Must be specified.")
@@ -167,24 +195,27 @@ func InitFlags(f *Flags) error {
 	flag.IntVar(&f.SshPort, "sp", INVALID_INT, "The port number for the SSH server. Must be specidfied")
 	flag.StringVar(&f.JoinIpAddress, "ja", INVALID_STRING, "The IP address of the machine running a Chord node. The Chord client will join this nodes ring. Represented as an ASCII string (e.g., 128.8.126.63). Must be specified if --jp is specified.")
 	flag.IntVar(&f.JoinPort, "jp", INVALID_INT, "The port that an existing Chord node is bound to and listening on. The Chord client will join this nodes ring. Represented as a base-10 integer. Must be specified if --ja is specified.")
-	flag.IntVar(&f.TimeStabilize, "ts", INVALID_INT, "The time in milliseconds between invocations of ‘stabilize’. Represented as a base-10 integer. Must be specified, with a value in the range of [1,60000].")
-	flag.IntVar(&f.TimeFixFingers, "tff", INVALID_INT, "The time in milliseconds between invocations of ‘fix fingers’. Represented as a base-10 integer. Must be specified, with a value in the range of [1,60000].")
+	flag.IntVar(&f.TimeStabilize, "ts", INVALID_INT, "The time in milliseconds between invocations of 'stabilize'. Represented as a base-10 integer. Must be specified, with a value in the range of [1,60000].")
+	flag.IntVar(&f.TimeFixFingers, "tff", INVALID_INT, "The time in milliseconds between invocations of 'fix fingers'. Represented as a base-10 integer. Must be specified, with a value in the range of [1,60000].")
 	flag.IntVar(&f.TimeCheckPredecessor, "tcp", INVALID_INT, "The time in milliseconds between invocations of check predecessor.")
 	flag.IntVar(&f.TimeBackup, "tb", INVALID_INT, "The time duration for backup interval.Must be specified")
 	flag.IntVar(&f.SuccessorLimit, "r", INVALID_INT, "The number of successors maintained by the Chord client. Represented as a base-10 integer. Must be specified, with a value in the range of [1,32].")
-	flag.StringVar(&f.identifierOverride, "i", INVALID_STRING, "The identifier (ID) assigned to the Chord client which will override the ID computed by the SHA1 sum of the client’s IP address and port number. Represented as a string of 40 characters matching [0-9a-fA-F]. Optional parameter.")
+	flag.StringVar(&f.identifierOverride, "i", INVALID_STRING, "The identifier (ID) assigned to the Chord client which will override the ID computed by the SHA1 sum of the client's IP address and port number. Represented as a string of 40 characters matching [0-9a-fA-F]. Optional parameter.")
 	flag.Parse()
 	return FlagsValidation(f)
 }
 
+// RangeFlagValidation checks if a flag value is within specified range
 func RangeFlagValidation(f, startRange, endRange int) bool {
 	return startRange <= f && f <= endRange
 }
 
+// ErrorMessageCreation formats error messages for flag validation
 func ErrorMessageCreation(flagname, description string) string {
 	return fmt.Sprintf("Set %v: %v\n", flagname, description)
 }
 
+// FlagsValidation performs comprehensive validation of all command line flags
 func FlagsValidation(f *Flags) error {
 	var errorString = ""
 	if f.IpAddress == INVALID_STRING {
@@ -233,6 +264,7 @@ func FlagsValidation(f *Flags) error {
 	return errors.New(errorString)
 }
 
+// GetAdditionaIIdentifier returns the optional identifier override if specified
 func (flag Flags) GetAdditionaIIdentifier() *string {
 	if flag.identifierOverride == INVALID_STRING {
 		return nil
@@ -240,10 +272,12 @@ func (flag Flags) GetAdditionaIIdentifier() *string {
 	return &flag.identifierOverride
 }
 
+// CreateNewRingSet determines if a new Chord ring should be created
 func (flag Flags) CreateNewRingSet() bool {
 	return flag.JoinIpAddress == INVALID_STRING && flag.JoinPort == INVALID_INT
 }
 
+// Lookup finds the node responsible for a given key in the DHT
 func Lookup(fileKey big.Int) (*NodeInfo, error) {
 	var n = Get()
 	var node, errFind = find(fileKey, n.Info, 32)
@@ -253,6 +287,7 @@ func Lookup(fileKey big.Int) (*NodeInfo, error) {
 	return node, nil
 }
 
+// StoreFile stores a file in the DHT with optional encryption and SSH transfer
 func StoreFile(filePath string, ssh bool, encrypted bool) (*NodeInfo, *big.Int, error) {
 	var fileName = GetFileName(filePath)
 	var fileKey = Hash(fileName)
@@ -288,6 +323,8 @@ func StoreFile(filePath string, ssh bool, encrypted bool) (*NodeInfo, *big.Int, 
 	return node, fileKey, nil
 }
 
+// ObtainNodeState generates a string representation of a node's state
+// Includes node identifier, IP address, port numbers, and optional index information
 func ObtainNodeState(node NodeInfo, collectionItem bool, index int, idealIdentifier *big.Int) (*string, error) {
 	var nodeInfo = fmt.Sprintf("\nNode Identifier: %v\nNode IP address: %v | Chord Node Port Number: %v | SSH Server Port Number: %v", node.Identifier.String(), node.IpAddress, node.ChordPort, node.SshPort)
 	if collectionItem {
@@ -297,8 +334,12 @@ func ObtainNodeState(node NodeInfo, collectionItem bool, index int, idealIdentif
 	return &nodeInfo, nil
 }
 
+// CalculatePossibleIdentifier is a function type for calculating node identifiers
+// Used for both finger table and successor list calculations
 type CalculatePossibleIdentifier func(int) big.Int
 
+// ObtainNodeArrayState generates a string representation of an array of nodes
+// Uses the provided calculator function to determine ideal identifiers
 func ObtainNodeArrayState(nodes []NodeInfo, calculatePossibleIdentifier CalculatePossibleIdentifier) (*string, error) {
 	var state = new(string)
 	for index, item := range nodes {
@@ -311,6 +352,9 @@ func ObtainNodeArrayState(nodes []NodeInfo, calculatePossibleIdentifier Calculat
 	}
 	return state, nil
 }
+
+// ObtainState generates a complete state report for the current node
+// Includes predecessor, successors, and finger table information
 func ObtainState() (*string, error) {
 	var n = Get()
 	var state, err = ObtainNodeState(n.Info, false, -1, nil)
@@ -326,7 +370,9 @@ func ObtainState() (*string, error) {
 
 	*state += "\n\nNodeSuccessors:\n"
 
-	var successorStatus, successorErr = ObtainNodeArrayState(n.Successors, func(i int) big.Int { return *new(big.Int).Add(big.NewInt(int64(i+1)), &n.Info.Identifier) })
+	var successorStatus, successorErr = ObtainNodeArrayState(n.Successors, func(i int) big.Int {
+		return *new(big.Int).Add(big.NewInt(int64(i+1)), &n.Info.Identifier)
+	})
 	if successorErr != nil {
 		return nil, successorErr
 	}
@@ -338,7 +384,9 @@ func ObtainState() (*string, error) {
 
 	*state += "\nNodeFingertable:\n"
 
-	var fingerTableStatus, fingerTableErr = ObtainNodeArrayState(n.FingerTable, func(i int) big.Int { return *Jump(n.Info.Identifier, i) })
+	var fingerTableStatus, fingerTableErr = ObtainNodeArrayState(n.FingerTable, func(i int) big.Int {
+		return *Jump(n.Info.Identifier, i)
+	})
 	if fingerTableErr != nil {
 		return nil, fingerTableErr
 	}
@@ -349,16 +397,24 @@ func ObtainState() (*string, error) {
 	}
 	return state, nil
 }
+
+// FindSuccessor implements the core Chord lookup operation
+// Returns true and the successor if found, false and closest preceding node otherwise
 func FindSuccessor(id big.Int) (bool, NodeInfo) {
 	var n = Get()
+	// Check if id falls between current node and its immediate successor
 	if Between(&n.Info.Identifier, &id, &n.Successors[0].Identifier, true) {
 		// fmt.Printf("[findSuccessor] Nodeid: %v, return value: %v, %v", id, true, n.Successors[0])
 		return true, n.Successors[0]
 	}
+	// Otherwise, return the closest preceding node
 	var NearestNode = NearestPrecedingNode(id)
 	// fmt.Printf("[findSuccessor] Nodeid: %v, return value: %v, %v", id, false, NearestNode)
 	return false, NearestNode
 }
+
+// find iteratively looks for the successor of an identifier
+// Implements the Chord protocol's find_successor operation with a maximum step limit
 func find(id big.Int, start NodeInfo, maxSteps int) (*NodeInfo, error) {
 	var found = false
 	var nextNode = start
@@ -376,6 +432,8 @@ func find(id big.Int, start NodeInfo, maxSteps int) (*NodeInfo, error) {
 	return nil, errors.New("Successors Could not be found")
 }
 
+// locateNearestPrecedingCandidate finds the closest preceding node from a given table
+// Used by both finger table and successor list lookups
 func locateNearestPrecedingCandidate(n Node, table []NodeInfo, id big.Int) *NodeInfo {
 	for i := len(table) - 1; i >= 0; i-- {
 		if Between(&n.Info.Identifier, &table[i].Identifier, &id, false) {
@@ -385,9 +443,13 @@ func locateNearestPrecedingCandidate(n Node, table []NodeInfo, id big.Int) *Node
 	return nil
 }
 
+// NearestPrecedingNode finds the closest preceding node for a given identifier
+// Implements the Chord protocol's closest_preceding_node operation
 func NearestPrecedingNode(id big.Int) NodeInfo {
 	var n = Get()
+	// Check finger table first
 	var candidate *NodeInfo = locateNearestPrecedingCandidate(n, n.FingerTable, id)
+	// Then check successor list
 	if c := locateNearestPrecedingCandidate(n, n.Successors, id); candidate == nil || (c != nil &&
 		Between(&id, &c.Identifier, &candidate.Identifier, false)) {
 		candidate = c
@@ -400,9 +462,12 @@ func NearestPrecedingNode(id big.Int) NodeInfo {
 	return n.Info
 }
 
-func Start(ipAddress string, chordPort, sshPort, fingerTableSize, successorsSize int, NewRingcreate bool, joinIpAddress *string, joinPort *int, additionalIdetifier *big.Int) error {
+// Start initializes a new Chord node and either creates a new ring or joins an existing one
+// This is the main entry point for node initialization
+func Start(ipAddress string, chordPort, sshPort, fingerTableSize, successorsSize int, NewRingcreate bool,
+	joinIpAddress *string, joinPort *int, additionalIdetifier *big.Int) error {
 	fmt.Printf("Beginning Chord Node at %v:%v with SSHServer on port: %v", ipAddress, chordPort, sshPort)
-	// Sets predecessor to nil
+	// Initialize node instance
 	var err = NodeInstanceInit(ipAddress, chordPort, sshPort, fingerTableSize, successorsSize, additionalIdetifier)
 	if err != nil {
 		return err
@@ -417,16 +482,24 @@ func Start(ipAddress string, chordPort, sshPort, fingerTableSize, successorsSize
 	var temp = Get().Info.Identifier
 	return join(*joinIpAddress, *joinPort, &temp, fingerTableSize)
 }
+
+// create initializes a new Chord ring with this node as the only member
 func create() {
 	NewSuccessor(Get().Info)
 	NewFingerTable(Get().Info)
 }
 
+// join makes this node join an existing Chord ring
+// Implements the Chord protocol's join operation
 func join(joinIpAddress string, joinPort int, nodeId *big.Int, maxSteps int) error {
 	var joinHash = big.NewInt(-1)
 	var sshPort = -1
 
-	var successor, errFind = find(*nodeId, NodeInfo{IpAddress: joinIpAddress, ChordPort: joinPort, SshPort: sshPort, Identifier: *joinHash}, maxSteps)
+	var successor, errFind = find(*nodeId, NodeInfo{
+		IpAddress:  joinIpAddress,
+		ChordPort:  joinPort,
+		SshPort:    sshPort,
+		Identifier: *joinHash}, maxSteps)
 	if errFind != nil {
 		return errFind
 	}
@@ -434,65 +507,31 @@ func join(joinIpAddress string, joinPort int, nodeId *big.Int, maxSteps int) err
 	NewFingerTable(*successor)
 	return nil
 }
-func Leave(n *Node) {
 
+// Leave handles node departure from the ring (currently unimplemented)
+func Leave(n *Node) {
 }
 
-// func Stabilize() {
-// 	var x *NodeInfo
-// 	var successorIndex = -1
-// 	var n = Get()
-// 	for index, item := range n.Successors {
-// 		var err error
-// 		x, err = Predecessor(ObtainChordAddress(item))
-// 		// fmt.Printf("[chordFunctions.Stabilize] NodePredecessor is %v, err: %v, NodeIndex: %v", x, err, index)
-// 		if err == nil {
-// 			successorIndex = index
-// 			break
-// 		}
-// 	}
-// 	if x != nil && Between(&n.Info.Identifier, &x.Identifier, &n.Successors[successorIndex].Identifier, false) {
-// 		NewSuccessor(*x)
-// 	} else if x != nil {
-// 	} else {
-
-// 		NewSuccessor(n.Info)
-// 	}
-// 	if NoOfSuccessors() > 0 {
-
-// 		var errNotify = ClientNotification(ObtainChordAddress(Successor()), n.Info)
-// 		if errNotify != nil {
-// 			fmt.Printf("[stabilze] Error found while notifying successor %v, message: %v", Successor(), errNotify.Error())
-// 		}
-
-// 		var successors, errSuc = Successors(ObtainChordAddress(Successor()))
-// 		if errSuc == nil {
-
-//				AddSuccessors(successors)
-//			} else {
-//				fmt.Printf("[stabilize] Error found while fetching node successors from successor %v, message: %v", Successor(), errSuc.Error())
-//			}
-//		}
-//		// fmt.Printf("[stabilize] Successor List updated with new Successor as %v, new length is %v", n.Successors[0], len(n.Successors))
-//	}
+// Stabilize implements the Chord protocol's stabilize operation
+// Periodically verifies node's immediate successor and updates successor list
 func Stabilize() {
 	var x *NodeInfo
 	var successorIndex = -1
 	var n = Get()
 
-	// 如果后继列表为空，指向自己
+	// If successor list is empty, point to self
 	if len(n.Successors) == 0 {
 		NewSuccessor(n.Info)
 		return
 	}
 
-	// 遍历后继节点，尝试获取前驱
+	// Try to get predecessor from successors with retries
 	var allSuccessorsDown = true
 	maxRetries := 3
 
+	// Iterate through successors to find a responsive one
 	for index, item := range n.Successors {
 		var err error
-		// 添加重试机制
 		for retry := 0; retry < maxRetries; retry++ {
 			x, err = Predecessor(ObtainChordAddress(item))
 			if err == nil {
@@ -501,7 +540,7 @@ func Stabilize() {
 				break
 			}
 			if retry < maxRetries-1 {
-				time.Sleep(time.Millisecond * 100) // 重试前等待
+				time.Sleep(time.Millisecond * 100) // Delay between retries
 			}
 		}
 		if !allSuccessorsDown {
@@ -509,22 +548,20 @@ func Stabilize() {
 		}
 	}
 
-	// 如果所有后继节点都无法访问
+	// If all successors are unresponsive, point to self
 	if allSuccessorsDown {
 		NewSuccessor(n.Info)
 		return
 	}
 
-	// 如果找到了前驱节点，检查是否需要更新后继
+	// Update successor if necessary
 	if x != nil && Between(&n.Info.Identifier, &x.Identifier, &n.Successors[successorIndex].Identifier, false) {
 		NewSuccessor(*x)
 	}
 
-	// 只在有后继节点时执行通知操作
+	// Notify successor and update successor list if possible
 	if NoOfSuccessors() > 0 {
-		// 通知后继节点，带重试
-		var notifySuccess bool
-		notifySuccess = false
+		var notifySuccess = false
 		for retry := 0; retry < maxRetries; retry++ {
 			errNotify := ClientNotification(ObtainChordAddress(Successor()), n.Info)
 			if errNotify == nil {
@@ -539,13 +576,10 @@ func Stabilize() {
 			}
 		}
 
-		// 只在通知成功时尝试获取后继的后继列表
 		if notifySuccess {
 			var successors []NodeInfo
-			var fetchSuccess bool
-			fetchSuccess = false
+			var fetchSuccess = false
 
-			// 获取后继的后继列表，带重试
 			for retry := 0; retry < maxRetries; retry++ {
 				var errSuc error
 				successors, errSuc = Successors(ObtainChordAddress(Successor()))
@@ -561,7 +595,6 @@ func Stabilize() {
 				}
 			}
 
-			// 只在成功获取后继列表时更新
 			if fetchSuccess && len(successors) > 0 {
 				AddSuccessors(successors)
 			}
@@ -569,15 +602,21 @@ func Stabilize() {
 	}
 }
 
+// Notify implements the Chord protocol's notify operation
+// Called when a node thinks it might be our predecessor
 func Notify(node NodeInfo) {
 	var n = Get()
 
+	// Update predecessor if current node has no predecessor,
+	// or if the new node is between current predecessor and current node
 	if n.Predecessor == nil || n.Predecessor.Identifier.Cmp(&n.Info.Identifier) == 0 ||
 		Between(&n.Predecessor.Identifier, &node.Identifier, &n.Info.Identifier, false) {
 		DefinePredecessor(&node)
 	}
 }
 
+// FixFingers implements the Chord protocol's fix_fingers operation
+// Periodically refreshes entries in the finger table
 func FixFingers() {
 	var next = NextFingerUpdation()
 	// fmt.Printf("[fixFingers] next: %v", next)
@@ -591,18 +630,25 @@ func FixFingers() {
 	DefineFingerTableIndex(next, *node)
 }
 
+// CheckPredecessor implements the Chord protocol's check_predecessor operation
+// Periodically verifies if predecessor is still alive
 func CheckPredecessor() {
 	var n = Get()
 	if n.Predecessor != nil && !CheckAlive(ObtainChordAddress(*n.Predecessor)) {
 		DefinePredecessor(nil)
 		// fmt.Printf("[checkPredecessor] Node Predecessor set to nil as previous Node Predecessorr %v was not responsive\n", n.Predecessor)
+
 	}
 }
 
+// ObtainMissingFiles fetches list of missing files from each successor
+// Used in file backup process
 func ObtainMissingFiles(successors []NodeInfo, files []string) [][]string {
 	var unavailableFiles [][]string
 	var wg = new(sync.WaitGroup)
 	wg.Add(len(successors))
+
+	// Concurrently check each successor for missing files
 	for _, successor := range successors {
 		go func(address NodeAddress) {
 			var rep, err = MissingFiles(address, files)
@@ -617,6 +663,9 @@ func ObtainMissingFiles(successors []NodeInfo, files []string) [][]string {
 	wg.Wait()
 	return unavailableFiles
 }
+
+// filterAvailableFiles filters files that should be stored on this node
+// based on the Chord identifier space
 func filterAvailableFiles(files []string, predecessorIdentifier big.Int, nodeIdentifier big.Int) []string {
 	var f = []string{}
 	for _, item := range files {
@@ -630,20 +679,22 @@ func filterAvailableFiles(files []string, predecessorIdentifier big.Int, nodeIde
 	return f
 }
 
+// FileBackup implements periodic file backup to successor nodes
+// Ensures data redundancy in the DHT
 func FileBackup() {
 	var n = Get()
 	if n.Predecessor == nil {
 		return
 	}
-
 	// fmt.Printf("[chordFunctions.FileBackup] Requested")
+	// Acquire lock for file operations
 	ObtainRWLock(false)
 	// fmt.Printf("[chordFunctions.FileBackup] ReadWrite lock obtained ")
-
 	var successors = n.Successors
 	var nodeKey = n.Info.Identifier.String()
 	var f, err = ListFiles(nodeKey)
 
+	// Filter files that should be backed up
 	var ownedFiles = filterAvailableFiles(f, n.Predecessor.Identifier, n.Info.Identifier)
 	if err != nil || len(ownedFiles) <= 0 || len(n.Successors) <= 0 {
 		LiberateRWLock(false)
@@ -651,9 +702,12 @@ func FileBackup() {
 	}
 	//fmt.Printf("[chordFunctions.FileBackup] Available Files in the system: %v\n", ownedFiles)
 
+	// Check which successors are missing which files
 	var unavailableFiles = ObtainMissingFiles(successors, ownedFiles)
 	var fls = NodeFilesRead(nodeKey, ownedFiles)
 	//fmt.Printf("[chordFunctions.FileBackup] Files Missing for Successors: %v\n", unavailableFiles)
+
+	// Concurrently transfer missing files to successors
 	var wg = new(sync.WaitGroup)
 	wg.Add(len(successors))
 	for index, item := range successors {
@@ -678,17 +732,22 @@ func FileBackup() {
 	LiberateRWLock(false)
 }
 
+// Singleton instance for the Chord node
 var once sync.Once
-
 var instance Node
 
+// NodeInstanceInit initializes the Chord node as a singleton
+// Sets up the node's initial state including finger table and successor list
 func NodeInstanceInit(ipAddress string, chordPort, sshPort, fingerTableSize, successorsSize int, additionalIdetifier *big.Int) error {
 	if fingerTableSize < 1 || successorsSize < 1 {
 		return errors.New("The Size needs to be atleast 1")
 	}
+
+	// Initialize node instance only once
 	once.Do(func() {
 		var address = NodeAddress(ipAddress) + ":" + NodeAddress(fmt.Sprintf("%v", chordPort))
 		var info NodeInfo
+		// Use provided identifier or generate from address
 		if additionalIdetifier == nil {
 			info = NodeInfo{
 				IpAddress:  ipAddress,
@@ -704,6 +763,8 @@ func NodeInstanceInit(ipAddress string, chordPort, sshPort, fingerTableSize, suc
 				Identifier: *additionalIdetifier,
 			}
 		}
+
+		// Initialize node with empty tables
 		instance = Node{
 			Info:            info,
 			FingerTable:     []NodeInfo{},
@@ -717,27 +778,35 @@ func NodeInstanceInit(ipAddress string, chordPort, sshPort, fingerTableSize, suc
 	return nil
 }
 
+// ObtainChordAddress formats a node's address for Chord protocol communication
 func ObtainChordAddress(node NodeInfo) NodeAddress {
 	return NodeAddress(fmt.Sprintf("%v:%v", node.IpAddress, node.ChordPort))
 }
 
+// ObtainSshAddress formats a node's address for SSH communication
 func ObtainSshAddress(node NodeInfo) string {
 	return fmt.Sprintf("%v:%v", node.IpAddress, node.SshPort)
 }
 
+// NextFingerUpdation returns the next finger table entry to update
+// Implements round-robin updating of finger table entries
 func NextFingerUpdation() int {
 	instance.NextFinger = (instance.NextFinger + 1) % instance.FingerTableSize
 	return instance.NextFinger
 }
 
+// NewSuccessor updates the node's immediate successor
 func NewSuccessor(successor NodeInfo) {
 	instance.Successors = []NodeInfo{successor}
 }
 
+// NewFingerTable initializes the finger table with a single entry
 func NewFingerTable(successor NodeInfo) {
 	instance.FingerTable = []NodeInfo{successor}
 }
 
+// SuccesorsContainsItself checks if the node itself appears in the successor list
+// Returns the index if found, -1 otherwise
 func SuccesorsContainsItself(successors []NodeInfo) int {
 	for index, item := range successors {
 		if item.Identifier.Cmp(&instance.Info.Identifier) == 0 {
@@ -747,15 +816,19 @@ func SuccesorsContainsItself(successors []NodeInfo) int {
 	return -1
 }
 
+// AddSuccessors updates the successor list while maintaining size limits
+// Excludes self from the successor list if present
 func AddSuccessors(successors []NodeInfo) {
 	var noOfElementsToAdd = instance.SuccessorsSize - 1
 	var elementsAddition []NodeInfo
 	// In case the successors array is shorter than the amount of elements to add, the slicing would produce a kernel panic
+	// Handle case where input array is shorter than required
 	if len(successors) > noOfElementsToAdd {
 		elementsAddition = successors[:noOfElementsToAdd]
 	} else {
 		elementsAddition = successors
 	}
+	// Remove self from successor list if present
 	var index = SuccesorsContainsItself(elementsAddition)
 	if index != -1 {
 		elementsAddition = elementsAddition[:index]
@@ -764,18 +837,21 @@ func AddSuccessors(successors []NodeInfo) {
 	instance.Successors = append(instance.Successors, elementsAddition...)
 }
 
-// Returns the current successor
+// Successor returns the node's current successor
 func Successor() NodeInfo {
 	return instance.Successors[0]
 }
 
+// NoOfSuccessors returns the current number of successors
 func NoOfSuccessors() int {
 	return len(instance.Successors)
 }
 
+// DefineFingerTableIndex updates a specific finger table entry
+// Ensures finger table grows sequentially
 // Set the index of an element if the previous index exists
 // This is a simplification due to the fact that the FixFingers method
-// adds elements to the list one at a time in an icreasing order.
+// adds elements to the list one at a time in an increasing order.
 func DefineFingerTableIndex(index int, item NodeInfo) error {
 	if index >= instance.FingerTableSize || index > len(instance.FingerTable) {
 		return errors.New("index above size, or element at index: " + fmt.Sprintf("%v", index-1) + " does not exist")
@@ -789,22 +865,26 @@ func DefineFingerTableIndex(index int, item NodeInfo) error {
 	return nil
 }
 
+// DefinePredecessor updates the node's predecessor
 func DefinePredecessor(predecessor *NodeInfo) {
 	instance.Predecessor = predecessor
 }
 
+// Get returns the current node instance
 func Get() Node {
 	return instance
 }
 
 //commands.go
 
+// Command represents a CLI command with its parameter requirements
 type Command struct {
-	requiredParamers   int
-	optionalParameters int
-	usageString        string
+	requiredParamers   int    // Number of required parameters
+	optionalParameters int    // Number of optional parameters
+	usageString        string // Usage instructions
 }
 
+// GetCommands returns the map of available CLI commands
 func GetCommands() map[string]Command {
 	return map[string]Command{
 		"Lookup":     {1, 0, "usage: Lookup <filename>"},
@@ -816,6 +896,7 @@ func GetCommands() map[string]Command {
 	}
 }
 
+// validateCommand checks if a command and its arguments are valid
 func validateCommand(cmdArr []string) error {
 	if len(cmdArr) <= 0 {
 		return errors.New("Provide Command")
@@ -830,6 +911,7 @@ func validateCommand(cmdArr []string) error {
 	return nil
 }
 
+// ObtainTurnOffOption parses boolean command options
 func ObtainTurnOffOption(cmdArr []string, index int) bool {
 	if len(cmdArr) > index && (strings.ToLower(cmdArr[index]) == "false" || strings.ToLower(cmdArr[index]) == "f") {
 		return false
@@ -837,11 +919,12 @@ func ObtainTurnOffOption(cmdArr []string, index int) bool {
 	return true
 }
 
+// CommandExecution handles execution of individual commands
 func CommandExecution(cmdArr []string) {
 	switch cmdArr[0] {
 	case "Lookup", "l":
 		var answer, errLookup = Lookup(*Hash(cmdArr[1]))
-		var fileHash = Hash(cmdArr[1]) // 先计算文件哈希值并保存
+		var fileHash = Hash(cmdArr[1]) // Calculate file hash first
 		if errLookup != nil {
 			fmt.Println(errLookup.Error())
 			return
@@ -852,13 +935,14 @@ func CommandExecution(cmdArr []string) {
 			return
 		}
 		fmt.Println(*state)
-		// 新增：尝试读取并打印文件内容
+		// Try to read and print file content
 		var content, errRead = ReadNodeFile(answer.Identifier.String(), fileHash.String())
 		if errRead != nil {
 			fmt.Printf("fail to read content: %v\n", errRead)
 			return
 		}
 		fmt.Printf("\ncontent of file:\n%s\n", content)
+
 	case "StoreFile", "s":
 		var ssh = ObtainTurnOffOption(cmdArr, 2)
 		var encryption = ObtainTurnOffOption(cmdArr, 3)
@@ -873,6 +957,7 @@ func CommandExecution(cmdArr []string) {
 			return
 		}
 		fmt.Printf("FileKey: %v\nStored at:\n%v\n", fileKey.String(), *state)
+
 	case "PrintState", "p":
 		var output, err = ObtainState()
 		if err != nil {
@@ -880,11 +965,13 @@ func CommandExecution(cmdArr []string) {
 			return
 		}
 		fmt.Println(*output)
+
 	default:
 		fmt.Println("command is not available")
 	}
 }
 
+// CommandsExecution provides the main command line interface loop
 func CommandsExecution() {
 	var scanner = bufio.NewReader(os.Stdin)
 	for {
@@ -904,6 +991,7 @@ func CommandsExecution() {
 	}
 }
 
+// Encryption encrypts content using RSA with OAEP padding
 func Encryption(content []byte) ([]byte, error) {
 	var pubKey, err = ObtainPubKey(ENCRYPTION_PUBLIC_KEY_PATH)
 	if err != nil {
@@ -913,8 +1001,10 @@ func Encryption(content []byte) ([]byte, error) {
 	return rsa.EncryptOAEP(sha256.New(), rand, pubKey, content, []byte(LABEL))
 }
 
+// Global RWLock for thread-safe file operations
 var lock = new(sync.RWMutex)
 
+// ObtainRWLock acquires the appropriate lock (read or write)
 func ObtainRWLock(write bool) {
 	if write {
 		lock.Lock()
@@ -923,6 +1013,7 @@ func ObtainRWLock(write bool) {
 	lock.RLock()
 }
 
+// LiberateRWLock releases the appropriate lock
 func LiberateRWLock(write bool) {
 	if write {
 		lock.Unlock()
@@ -931,6 +1022,7 @@ func LiberateRWLock(write bool) {
 	lock.RUnlock()
 }
 
+// InitNodeFileSystem initializes the file system directory for a node
 func InitNodeFileSystem(nodeKey string) error {
 	var folder = ObtainFileDir(nodeKey)
 	var err = os.MkdirAll(folder, PERMISSIONS_DIR)
@@ -940,6 +1032,7 @@ func InitNodeFileSystem(nodeKey string) error {
 	return nil
 }
 
+// ListFiles returns a list of files stored in the node's directory
 func ListFiles(nodeKey string) ([]string, error) {
 	var dir, errReadDir = os.ReadDir(ObtainFileDir(nodeKey))
 	if errReadDir != nil {
@@ -953,21 +1046,25 @@ func ListFiles(nodeKey string) ([]string, error) {
 	return files, nil
 }
 
+// GetFileName extracts the filename from a full path
 func GetFileName(filePath string) string {
 	var paths = strings.Split(filePath, "/")
 	return paths[len(paths)-1]
 }
 
+// ReadFile reads the content of a file from disk
 func ReadFile(filePath string) ([]byte, error) {
 	var file, errRead = os.ReadFile(filePath)
 	return file, errRead
 }
 
+// ReadNodeFile reads a file from a node's storage directory
 func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 	var file, errRead = os.ReadFile(ObtainFilePath(fileKey, nodeKey))
 	return file, errRead
 }
 
+// NodeFilesRead reads multiple files from a node's storage
 func NodeFilesRead(nodeKey string, filePaths []string) map[string]*[]byte {
 	var files = make(map[string]*[]byte)
 	for _, filePath := range filePaths {
@@ -979,16 +1076,18 @@ func NodeFilesRead(nodeKey string, filePaths []string) map[string]*[]byte {
 	return files
 }
 
+// ObtainFileDir returns the full path to a node's storage directory
 func ObtainFileDir(nodeKey string) string {
 	return filepath.Join(FOLDER_RESOURCES, nodeKey)
 }
 
+// ObtainFilePath constructs the full path for a file in a node's storage
 func ObtainFilePath(key, nodeKey string) string {
 	return filepath.Join(ObtainFileDir(nodeKey), key)
 }
 
+// NodeFileWrite writes content to a file in a node's storage
 func NodeFileWrite(key, nodeKey string, content []byte) error {
-
 	var folder = ObtainFileDir(nodeKey)
 	var err = os.MkdirAll(folder, PERMISSIONS_DIR)
 	if err != nil {
@@ -997,6 +1096,7 @@ func NodeFileWrite(key, nodeKey string, content []byte) error {
 	return os.WriteFile(filepath.Join(folder, key), content, PERMISSIONS_FILE)
 }
 
+// NodeFilesWrite writes multiple files to a node's storage
 func NodeFilesWrite(nodeKey string, files map[string]*[]byte) []error {
 	var folder = ObtainFileDir(nodeKey)
 	var err = os.MkdirAll(folder, PERMISSIONS_DIR)
@@ -1013,6 +1113,7 @@ func NodeFilesWrite(nodeKey string, files map[string]*[]byte) []error {
 	return errsWrite
 }
 
+// AddToFile appends content to an existing file
 func AddToFile(key, nodeKey string, content []byte) (int, error) {
 	var file, errOpen = os.OpenFile(ObtainFilePath(key, nodeKey), os.O_APPEND|os.O_WRONLY, PERMISSIONS_FILE)
 	if errOpen != nil {
@@ -1028,11 +1129,14 @@ func AddToFile(key, nodeKey string, content []byte) (int, error) {
 	return num, nil
 }
 
+// DeleteFile removes a file from a node's storage
 func DeleteFile(key, nodeKey string) {
 	os.Remove(ObtainFilePath(key, nodeKey))
 }
 
-// identifier.go
+// Identifier operations and hashing functions
+
+// ConvertHexString converts a hexadecimal string to a big.Int
 func ConvertHexString(hexString string) (*big.Int, error) {
 	var bytes, err = hex.DecodeString(hexString)
 	if err != nil {
@@ -1045,8 +1149,11 @@ func ConvertHexString(hexString string) (*big.Int, error) {
 const keySize = BITS_SIZE_RING
 
 var two = big.NewInt(2)
+
+// hashMod is the modulus for the hash space (2^BITS_SIZE_RING)
 var hashMod = new(big.Int).Exp(two, big.NewInt(keySize), nil)
 
+// HashBytes generates a big.Int hash from a byte slice using SHA-1
 func HashBytes(b []byte) *big.Int {
 	var hasher = sha1.New()
 	hasher.Write(b)
@@ -1054,18 +1161,21 @@ func HashBytes(b []byte) *big.Int {
 	return new(big.Int).SetBytes(bytes)
 }
 
+// Hash generates a big.Int hash from a string
 func Hash(elt string) *big.Int {
 	return HashBytes([]byte(elt))
 }
 
+// Jump calculates (n + 2^fingerentry) mod 2^m
+// Used for finger table calculations
 func Jump(nodeIdentifier big.Int, fingerentry int) *big.Int {
 	var fingerentryBig = big.NewInt(int64(fingerentry))
 	var jump = new(big.Int).Exp(two, fingerentryBig, nil)
 	var sum = new(big.Int).Add(&nodeIdentifier, jump)
-
 	return new(big.Int).Mod(sum, hashMod)
 }
 
+// Between checks if an element falls between two points in the identifier circle
 func Between(start, elt, end *big.Int, inclusive bool) bool {
 	if end.Cmp(start) > 0 {
 		return (start.Cmp(elt) < 0 && elt.Cmp(end) < 0) || (inclusive && elt.Cmp(end) == 0)
@@ -1074,6 +1184,9 @@ func Between(start, elt, end *big.Int, inclusive bool) bool {
 	}
 }
 
+// Key management and network functions
+
+// ObtainKeyBytes reads a key file from disk
 func ObtainKeyBytes(keyPath string) ([]byte, error) {
 	var content, errRead = os.ReadFile(keyPath)
 	if errRead != nil {
@@ -1082,6 +1195,7 @@ func ObtainKeyBytes(keyPath string) ([]byte, error) {
 	return content, nil
 }
 
+// ObtainSSHAuthentication creates an SSH authentication method from a private key
 func ObtainSSHAuthentication(privateKeyPath string) (ssh.AuthMethod, error) {
 	var content, errRead = ObtainKeyBytes(privateKeyPath)
 	if errRead != nil {
@@ -1091,10 +1205,10 @@ func ObtainSSHAuthentication(privateKeyPath string) (ssh.AuthMethod, error) {
 	if parseErr != nil {
 		return nil, parseErr
 	}
-
 	return ssh.PublicKeys(key), nil
 }
 
+// ObtainPubKey loads and parses an RSA public key from a file
 func ObtainPubKey(path string) (*rsa.PublicKey, error) {
 	var content, errRead = ObtainKeyBytes(path)
 	if errRead != nil {
@@ -1117,8 +1231,12 @@ func ObtainPubKey(path string) (*rsa.PublicKey, error) {
 	return pubKey, nil
 }
 
+// RPC Server and Handlers
+
+// ChordRPCHandler handles RPC requests for the Chord node
 type ChordRPCHandler int
 
+// RpcServerInit initializes the RPC server for node communication
 func RpcServerInit(l *net.Listener) {
 	var handler = new(ChordRPCHandler)
 	rpc.Register(handler)
@@ -1126,35 +1244,44 @@ func RpcServerInit(l *net.Listener) {
 	go http.Serve(*l, nil)
 }
 
+// RPC Handler Methods
+
+// Predecessor handles RPC requests for node's predecessor information
 func (t *ChordRPCHandler) Predecessor(empty string, reply *PredecessorRep) error {
 	var node = Get()
 	*reply = PredecessorRep{Predecessor: node.Predecessor}
 	return nil
 }
+
+// Successors handles RPC requests for node's successor list
 func (t *ChordRPCHandler) Successors(empty string, reply *SuccessorRep) error {
 	var node = Get()
 	*reply = SuccessorRep{Successors: node.Successors}
 	return nil
 }
+
+// FindSuccessor handles RPC requests to find the successor for a given ID
 func (t *ChordRPCHandler) FindSuccessor(args *big.Int, reply *FindSuccessorRep) error {
 	var f, n = FindSuccessor(*args)
 	*reply = FindSuccessorRep{Found: f, Node: n}
 	return nil
 }
 
+// Notify handles RPC notifications from potential predecessors
 func (t *ChordRPCHandler) Notify(args *NodeInfo, reply *string) error {
 	Notify(*args)
 	return nil
 }
 
+// StoreFile handles RPC requests to store a file on this node
 func (t *ChordRPCHandler) StoreFile(args *StoreFileArgs, reply *string) error {
 	var key = args.Key.String()
 	fmt.Printf("[rpcServerStoreFile] save file %v, content length %v", key, len(args.Content))
 	var nodeKey = Get().Info.Identifier
-
 	return NodeFileWrite(key, nodeKey.String(), args.Content)
 }
 
+// FileTransfer handles RPC requests to transfer multiple files
 func (t *ChordRPCHandler) FileTransfer(args *TransferFileArgs, reply *string) error {
 	fmt.Printf("[rpcServerTransferFile] save %v number of files", len(args.Files))
 	var nodeKey = Get().Info.Identifier
@@ -1165,24 +1292,25 @@ func (t *ChordRPCHandler) FileTransfer(args *TransferFileArgs, reply *string) er
 	return nil
 }
 
+// MissingFiles handles RPC requests to identify missing files
 func (t *ChordRPCHandler) MissingFiles(args *[]string, reply *[]string) error {
-	//fmt.Printf("[rpcServer] missing files with args: %v\n", *args)
 	var nodeKey = Get().Info.Identifier
 	var files, err = ListFiles(nodeKey.String())
 	if err != nil {
 		return err
 	}
 	var temp = ObtainExclusive(*args, files)
-	//fmt.Printf("[rpcServer] replying with: %v\n", temp)
 	*reply = temp
 	return nil
 }
 
+// CheckAlive handles RPC requests to check if node is responsive
 func (t *ChordRPCHandler) CheckAlive(empty string, reply *bool) error {
 	*reply = true
 	return nil
 }
 
+// ObtainExclusive is a generic function to find elements in arr1 that are not in arr2
 func ObtainExclusive[T comparable](arr1, arr2 []T) []T {
 	var exclusive = []T{}
 	for _, item1 := range arr1 {
@@ -1200,19 +1328,25 @@ func ObtainExclusive[T comparable](arr1, arr2 []T) []T {
 	return exclusive
 }
 
+// RPC Client Functions
+
+// getConnection establishes an RPC connection to a node
 func getConnection(nodeAddress NodeAddress) (*rpc.Client, error) {
 	var client, err = rpc.DialHTTP("tcp", string(nodeAddress))
 	return client, err
 }
 
+// handleCall is a generic function to handle RPC calls
 func handleCall[ArgT, RepT any](nodeAddress NodeAddress, method string, args *ArgT, reply *RepT) error {
 	var client, err = getConnection(nodeAddress)
 	if err != nil {
 		return err
 	}
-	defer client.Close() // 确保连接被关闭
+	defer client.Close() // Ensure connection is closed
 	return client.Call(method, args, reply)
 }
+
+// Predecessor retrieves predecessor information from a remote node
 func Predecessor(node NodeAddress) (*NodeInfo, error) {
 	var reply PredecessorRep
 	var dummyArg = "empty"
@@ -1223,6 +1357,7 @@ func Predecessor(node NodeAddress) (*NodeInfo, error) {
 	return reply.Predecessor, nil
 }
 
+// Successors retrieves successor list from a remote node
 func Successors(node NodeAddress) ([]NodeInfo, error) {
 	var reply SuccessorRep
 	var dummyArg = "empty"
@@ -1232,6 +1367,8 @@ func Successors(node NodeAddress) ([]NodeInfo, error) {
 	}
 	return reply.Successors, err
 }
+
+// ClientLocateSuccessor requests successor information for an ID from a remote node
 func ClientLocateSuccessor(node NodeAddress, id *big.Int) (*FindSuccessorRep, error) {
 	var reply FindSuccessorRep
 	var err = handleCall(node, "ChordRPCHandler.FindSuccessor", id, &reply)
@@ -1240,11 +1377,15 @@ func ClientLocateSuccessor(node NodeAddress, id *big.Int) (*FindSuccessorRep, er
 	}
 	return &reply, nil
 }
+
+// ClientNotification sends a notification to a remote node
 func ClientNotification(notifiee NodeAddress, notifier NodeInfo) error {
 	var reply string
 	var err = handleCall(notifiee, "ChordRPCHandler.Notify", &notifier, &reply)
 	return err
 }
+
+// StoreFileClient sends a request to store a file on a remote node
 func StoreFileClient(nodeAddress NodeAddress, fileKey big.Int, content []byte) error {
 	var reply string
 	var args = StoreFileArgs{Key: fileKey, Content: content}
@@ -1252,6 +1393,7 @@ func StoreFileClient(nodeAddress NodeAddress, fileKey big.Int, content []byte) e
 	return err
 }
 
+// FileTransfer sends multiple files to a remote node
 func FileTransfer(nodeAddress NodeAddress, files map[string]*[]byte) error {
 	var reply string
 	var args = TransferFileArgs{Files: files}
@@ -1259,20 +1401,24 @@ func FileTransfer(nodeAddress NodeAddress, files map[string]*[]byte) error {
 	return err
 }
 
+// MissingFiles requests list of missing files from a remote node
 func MissingFiles(nodeAddress NodeAddress, files []string) ([]string, error) {
 	var reply []string
 	var err = handleCall(nodeAddress, "ChordRPCHandler.MissingFiles", &files, &reply)
 	return reply, err
 }
 
+// CheckAlive checks if a remote node is responsive
 func CheckAlive(nodeAddress NodeAddress) bool {
 	var dummy = "empty"
 	var reply bool
 	var err = handleCall(nodeAddress, "ChordRPCHandler.CheckAlive", &dummy, &reply)
 	return err == nil && reply
 }
-func FileSending(address string, fileName string, fileContent []byte) error {
 
+// FileSending handles SFTP file transfer to a remote node
+func FileSending(address string, fileName string, fileContent []byte) error {
+	// Load and parse public key
 	var keyContent, errRead = ObtainKeyBytes(AUTHENTICATION_PUBLIC_KEY_PATH)
 	if errRead != nil {
 		return errRead
@@ -1287,6 +1433,7 @@ func FileSending(address string, fileName string, fileContent []byte) error {
 		return errPubKey
 	}
 
+	// Set up SSH authentication
 	var authMethod, errAuth = ObtainSSHAuthentication(AUTHENTICATION_PRIVATE_KEY_PATH)
 	if errAuth != nil {
 		return errAuth
@@ -1298,6 +1445,7 @@ func FileSending(address string, fileName string, fileContent []byte) error {
 		HostKeyCallback: ssh.FixedHostKey(pubKey),
 	}
 
+	// Establish SSH connection
 	var con, errCon = ssh.Dial("tcp", string(address), &configuration)
 	if errCon != nil {
 		fmt.Printf("[sftpClient.FileSending] Could not connect %v, err: %v\n", string(address), errCon)
@@ -1307,6 +1455,7 @@ func FileSending(address string, fileName string, fileContent []byte) error {
 
 	con.SendRequest("keepalive", false, nil)
 
+	// Create SFTP client
 	var client, errClient = sftp.NewClient(con)
 	if errClient != nil {
 		fmt.Printf("[sftpClient.FileSending] Client Creation  %v, err: %v\n", string(address), errCon)
@@ -1315,12 +1464,14 @@ func FileSending(address string, fileName string, fileContent []byte) error {
 
 	var filePath = filepath.Join("resources", fileName)
 
+	// Create directory if needed
 	var errMkdir = client.MkdirAll("resources")
 	if errMkdir != nil {
 		fmt.Printf("[sftpClient.FileSending] Directory Creation err: %v\n", errMkdir)
 		return errMkdir
 	}
 
+	// Create and write file
 	var file, errFile = client.Create(filePath)
 	if errFile != nil {
 		fmt.Printf("[sftpClient.FileSending] File Creation %v, err: %v\n", fileName, errCon)
@@ -1339,8 +1490,10 @@ func FileSending(address string, fileName string, fileContent []byte) error {
 	return nil
 }
 
+// FunctionSchedule is a type for periodic maintenance functions
 type FunctionSchedule func()
 
+// Schedule runs a maintenance function periodically
 func Schedule(function FunctionSchedule, t time.Duration) {
 	go func() {
 		for {
