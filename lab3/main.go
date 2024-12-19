@@ -380,7 +380,7 @@ func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
 	currentNode := Get()
 	nodeID := currentNode.Info.Identifier.String()
 
-	// Calculate file identifier
+	// Calculate file identifier using file name
 	fileName := GetFileName(filePath)
 	fileKey := Hash(fileName)
 
@@ -390,17 +390,20 @@ func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
 		return nil, nil, fmt.Errorf("lookup failed: %w", errLookup)
 	}
 
-	// Read the file content
+	// Read the original file content
 	content, errRead := ReadFile(filePath)
 	if errRead != nil {
 		return nil, nil, fmt.Errorf("failed to read file: %w", errRead)
 	}
 
-	// Create file metadata
-	metadata := FileMetadata{
-		UploadNodeID: nodeID,
-		Encrypted:    encrypted,
-		Timestamp:    time.Now(),
+	// Create the FileContent structure with metadata
+	fileContent := FileContent{
+		Metadata: FileMetadata{
+			UploadNodeID: nodeID,     // Store the original uploader's ID
+			Encrypted:    encrypted,  // Record encryption status
+			Timestamp:    time.Now(), // Record storage time
+		},
+		Content: content, // Initially store unencrypted content
 	}
 
 	// Handle encryption if requested
@@ -417,16 +420,10 @@ func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("encryption failed: %w", err)
 		}
-		content = encryptedContent
+		fileContent.Content = encryptedContent // Replace with encrypted content
 	}
 
-	// Prepare the complete file content structure
-	fileContent := FileContent{
-		Metadata: metadata,
-		Content:  content,
-	}
-
-	// Serialize the content structure
+	// Serialize the complete FileContent structure
 	serializedContent, err := json.Marshal(fileContent)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to serialize file content: %w", err)
@@ -467,7 +464,7 @@ func validateFilePath(path string) error {
 	if err != nil {
 		return fmt.Errorf("cannot open file: %w", err)
 	}
-	file.Close()
+	defer file.Close()
 
 	return nil
 }
@@ -606,7 +603,7 @@ func find(id big.Int, start NodeInfo, maxSteps int) (*NodeInfo, error) {
 		}
 
 		nextNode = res.Node
-		fmt.Printf("Moving to next node: %v\n", nextNode.Identifier.String())
+		//fmt.Printf("Moving to next node: %v\n", nextNode.Identifier.String())
 	}
 
 	return nil, errors.New("Successors Could not be found")
@@ -976,15 +973,17 @@ func filterAvailableFiles(files []string, predecessorIdentifier big.Int, nodeIde
 
 // FileBackup implements periodic file backup to successor nodes
 // Ensures data redundancy in the DHT
+// FileBackup implements periodic file backup to successor nodes
 func FileBackup() {
 	var n = Get()
 	if n.Predecessor == nil {
 		return
 	}
-	// fmt.Printf("[chordFunctions.FileBackup] Requested")
+
 	// Acquire lock for file operations
 	ObtainRWLock(false)
-	// fmt.Printf("[chordFunctions.FileBackup] ReadWrite lock obtained ")
+	defer LiberateRWLock(false)
+
 	var successors = n.Successors
 	var nodeKey = n.Info.Identifier.String()
 	var f, err = ListFiles(nodeKey)
@@ -992,39 +991,43 @@ func FileBackup() {
 	// Filter files that should be backed up
 	var ownedFiles = filterAvailableFiles(f, n.Predecessor.Identifier, n.Info.Identifier)
 	if err != nil || len(ownedFiles) <= 0 || len(n.Successors) <= 0 {
-		LiberateRWLock(false)
 		return
 	}
-	//fmt.Printf("[chordFunctions.FileBackup] Available Files in the system: %v\n", ownedFiles)
 
 	// Check which successors are missing which files
 	var unavailableFiles = ObtainMissingFiles(successors, ownedFiles)
-	var fls = NodeFilesRead(nodeKey, ownedFiles)
-	//fmt.Printf("[chordFunctions.FileBackup] Files Missing for Successors: %v\n", unavailableFiles)
+
+	// Read files with their complete FileContent structure
+	var fls = make(map[string]*[]byte)
+	for _, filename := range ownedFiles {
+		content, err := os.ReadFile(filepath.Join(ObtainFileDir(nodeKey), filename))
+		if err == nil {
+			fls[filename] = &content
+		}
+	}
 
 	// Concurrently transfer missing files to successors
 	var wg = new(sync.WaitGroup)
 	wg.Add(len(successors))
-	for index, item := range successors {
+	for index, successor := range successors {
 		go func(i int, node NodeInfo) {
+			defer wg.Done()
+
 			var filesToTransfer = map[string]*[]byte{}
 			if i < len(unavailableFiles) {
 				for _, missingFile := range unavailableFiles[i] {
-					var file, ok = fls[missingFile]
-					if ok {
-						filesToTransfer[missingFile] = file
+					if content, ok := fls[missingFile]; ok {
+						// 直接传输原始内容（包含 FileContent 结构）
+						filesToTransfer[missingFile] = content
 					}
 				}
 				if len(filesToTransfer) > 0 {
 					FileTransfer(ObtainChordAddress(node), filesToTransfer)
 				}
 			}
-			wg.Done()
-		}(index, item)
+		}(index, successor)
 	}
 	wg.Wait()
-
-	LiberateRWLock(false)
 }
 
 // Singleton instance for the Chord node
@@ -1384,56 +1387,53 @@ func ReadFile(filePath string) ([]byte, error) {
 	return file, errRead
 }
 
-// ReadNodeFile reads and potentially decrypts a file from the DHT
 // Now checks only node-specific directories
+// ReadNodeFile reads and potentially decrypts a file from the DHT
 func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 	var currentNode = Get()
 	var currentNodeID = currentNode.Info.Identifier.String()
 
-	fmt.Printf("Reading file - NodeKey: %s, FileKey: %s, CurrentNodeID: %s\n",
-		nodeKey, fileKey, currentNodeID)
-
-	// Helper function to read and try to decrypt content
-	readAndTryDecrypt := func(content []byte) []byte {
-		// 总是尝试用当前节点的密钥解密
-		km := NewKeyManager(currentNodeID)
-		fe := NewFileEncryptor(km)
-
-		// 先尝试解析为 FileContent 结构
+	// Helper function to read and try decrypt content
+	readAndTryDecrypt := func(content []byte) ([]byte, error) {
+		// 尝试解析为 FileContent 结构
 		var fileContent FileContent
 		if err := json.Unmarshal(content, &fileContent); err != nil {
 			// 如果不是 JSON 格式，直接返回原内容
-			return content
+			return content, nil
 		}
 
 		// 如果文件没有加密，直接返回内容
 		if !fileContent.Metadata.Encrypted {
-			return fileContent.Content
+			return fileContent.Content, nil
 		}
 
-		// 尝试解密
-		decryptedContent, err := fe.DecryptFile(fileContent.Content)
-		if err != nil {
-			// 解密失败，返回加密的内容
-			return fileContent.Content
+		// 如果当前节点是原始上传节点，尝试解密
+		if fileContent.Metadata.UploadNodeID == currentNodeID {
+			km := NewKeyManager(currentNodeID)
+			fe := NewFileEncryptor(km)
+
+			decryptedContent, err := fe.DecryptFile(fileContent.Content)
+			if err != nil {
+				return nil, fmt.Errorf("decryption failed: %v", err)
+			}
+			return decryptedContent, nil
 		}
 
-		// 解密成功，返回解密后的内容
-		return decryptedContent
+		// 如果不是上传节点，返回加密内容
+		return fileContent.Content, nil
 	}
 
 	// 首先尝试从指定节点的目录读取
 	nodePath := filepath.Join("./resources", nodeKey, fileKey)
 	if content, err := os.ReadFile(nodePath); err == nil {
-		return readAndTryDecrypt(content), nil
+		return readAndTryDecrypt(content)
 	}
 
 	// 如果本地读取失败，尝试从其他节点读取
 	for _, successor := range currentNode.Successors {
-		fmt.Printf("Trying successor: %s\n", successor.Identifier.String())
 		content, err := ReadRemoteFile(successor, fileKey)
 		if err == nil {
-			return readAndTryDecrypt(content), nil
+			return readAndTryDecrypt(content)
 		}
 	}
 
@@ -1694,7 +1694,7 @@ func (t *ChordRPCHandler) Notify(args *NodeInfo, reply *string) error {
 // KeyManager handles AES key generation and management
 type KeyManager struct {
 	KeyPath string
-	NodeID  string // 添加节点ID标识
+	NodeID  string
 }
 
 // NewKeyManager creates a new key manager instance
@@ -1707,6 +1707,14 @@ func NewKeyManager(nodeID string) *KeyManager {
 
 // GenerateKey generates a new AES-256 key if it doesn't exist
 func (km *KeyManager) GenerateKey() error {
+	// Only generate key if this is the current node
+	currentNode := Get()
+	currentNodeID := currentNode.Info.Identifier.String()
+
+	if km.NodeID != currentNodeID {
+		return nil // Skip key generation for other nodes
+	}
+
 	// Check if key already exists
 	if _, err := os.Stat(km.KeyPath); err == nil {
 		return nil
@@ -1729,7 +1737,17 @@ func (km *KeyManager) GenerateKey() error {
 }
 
 // LoadKey loads the AES key from file
+// Now only loads key if it's the current node's key
 func (km *KeyManager) LoadKey() ([]byte, error) {
+	// Only allow loading key for current node
+	currentNode := Get()
+	currentNodeID := currentNode.Info.Identifier.String()
+
+	if km.NodeID != currentNodeID {
+		return nil, fmt.Errorf("unauthorized: cannot load key for node %s (current node: %s)",
+			km.NodeID, currentNodeID)
+	}
+
 	key, err := os.ReadFile(km.KeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load key: %w", err)
